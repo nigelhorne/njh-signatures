@@ -1,0 +1,2 @@
+# njh-signatures
+ClamAV Signatures
