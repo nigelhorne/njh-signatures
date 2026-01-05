@@ -84,14 +84,14 @@ GetOptions(
 	'max-size=i'		 => \$max_size,
 	'no-duplicate-check' => sub { $duplicate_check = 0 },
 	'yara=s'			 => \$yara_output,
-	'include-body'	   => \$include_body,
+	'include-body'	=> \$include_body,
 	'threads|j=i'		=> \$threads,
 	'json=s'			 => \$json_output,
 	'xml=s'			  => \$xml_output,
 	'templates=s'		=> \$template_dir,
-	'extract-iocs'	   => \$extract_iocs,
+	'extract-iocs'	=> \$extract_iocs,
 	'fuzzy-hash'		 => \$use_fuzzy,
-	'virustotal-key=s'   => \$virustotal_key,
+	'virustotal-key=s' => \$virustotal_key,
 	'database=s'		 => \$database_file,
 	'api-port=i'		 => \$api_port,
 	'api-host=s'		 => \$api_host,
@@ -343,6 +343,9 @@ sub process_eml_file {
 		basename => $file_basename,
 		timestamp => time(),
 		size => -s $eml_file,
+		score => 0,
+		verdict => 'clean',	# clean | suspicious | malicious
+		score_reasons => [],
 		signatures => [],
 		attachments => [],
 		iocs => { urls => [], ips => [], domains => [], emails => [] },
@@ -372,7 +375,9 @@ sub process_eml_file {
 	# Query VirusTotal if enabled
 	query_virustotal($result) if $vt_client;
 
-	$entity->purge;
+	finalize_verdict($result);
+
+	$entity->purge();
 	return $result;
 }
 
@@ -386,6 +391,27 @@ sub process_email_content {
 	my $message_id = $head->get('Message-ID', 0) || '';
 
 	chomp($subject, $from, $to, $message_id);
+
+	# Suspicious subject keywords
+	if ($subject =~ /(urgent|verify|suspend|locked|action required|password)/i) {
+		add_score($result, 2, "Suspicious subject keywords");
+	}
+
+	# Missing Message-ID is very spammy
+	unless ($message_id) {
+		add_score($result, 2, "Missing Message-ID header");
+	}
+
+	# From / Reply-To mismatch
+	my $reply_to = decode_header($head->get('Reply-To', 0) || '');
+	if ($reply_to && $from && $reply_to ne $from) {
+		add_score($result, 2, "From/Reply-To mismatch");
+	}
+
+	# HTML-only email
+	unless (has_text_plain($entity)) {
+		add_score($result, 1, "HTML-only email");
+	}
 
 	my $sig_data = "Subject: $subject\nFrom: $from\nTo: $to\nMessage-ID: $message_id";
 
@@ -445,6 +471,20 @@ sub process_attachments {
 			fuzzy_hash => '',
 			virustotal => {}
 		};
+
+		if ($att_result->{is_executable}) {
+			add_score($result, 8, "Executable attachment: $filename");
+		}
+
+		# Macro-enabled Office docs
+		if ($filename =~ /\.(docm|xlsm|pptm)$/i) {
+			add_score($result, 6, "Macro-enabled Office document");
+		}
+
+		# Double extension trick
+		if ($filename =~ /\.(pdf|doc|xls|jpg|png)\.(exe|js|vbs|scr)$/i) {
+			add_score($result, 8, "Double-extension attachment");
+		}
 
 		# Generate signatures
 		my $sigs = generate_signatures($data, "${file_basename}_${filename}");
@@ -521,6 +561,26 @@ sub extract_iocs_from_email {
 		}
 	}
 
+	my %shorteners = map { $_ => 1 } qw(
+		bit.ly t.co goo.gl tinyurl.com ow.ly buff.ly is.gd rebrand.ly
+	);
+
+	foreach my $url (@{$result->{iocs}->{urls}}) {
+		if ($url =~ m{https?://([^/]+)}) {
+			my $domain = lc $1;
+			$domain =~ s/^www\.//;
+
+			if ($shorteners{$domain}) {
+				add_score($result, 3, "URL shortener: $domain");
+			}
+
+			# IP-based URL
+			if ($domain =~ /^\d+\.\d+\.\d+\.\d+$/) {
+				add_score($result, 4, "IP-based URL");
+			}
+		}
+	}
+
 	my $total_iocs = @{$result->{iocs}->{urls}} + @{$result->{iocs}->{ips}} +
 					 @{$result->{iocs}->{domains}} + @{$result->{iocs}->{emails}};
 	$stats{iocs_extracted} += $total_iocs;
@@ -548,6 +608,12 @@ sub check_template_matches {
 				matches => $matches,
 				total => $total_patterns
 			};
+
+			add_score(
+				$result,
+				int(5 * $match_ratio),
+				"Template match: $template_name"
+			);
 		}
 	}
 }
@@ -571,6 +637,13 @@ sub query_virustotal {
 			$stats{vt_queries}++;
 		};
 		warn "VirusTotal query error: $@" if $@;
+	}
+	if (($result->{virustotal}->{positives} || 0) > 0) {
+		add_score(
+			$result,
+			$result->{virustotal}->{positives} >= 5 ? 10 : 5,
+			"VirusTotal detections: $result->{virustotal}->{positives}"
+		);
 	}
 }
 
@@ -1288,6 +1361,38 @@ sub create_error_result {
 		template_matches => [],
 		yara_rules => []
 	};
+}
+
+sub add_score {
+	my ($result, $points, $reason) = @_;
+
+	return unless $points;
+	$result->{score} += $points;
+
+	push @{$result->{score_reasons}}, {
+		points => $points,
+		reason => $reason,
+	};
+}
+
+sub finalize_verdict {
+	my ($result) = @_;
+
+	if ($result->{score} >= 15) {
+		$result->{verdict} = 'malicious';
+	} elsif ($result->{score} >= 6) {
+		$result->{verdict} = 'suspicious';
+	} else {
+		$result->{verdict} = 'clean';
+	}
+}
+
+sub has_text_plain {
+	my ($entity) = @_;
+	for my $part ($entity->parts_DFS) {
+		return 1 if $part->effective_type eq 'text/plain';
+	}
+	return 0;
 }
 
 sub print_final_stats {
