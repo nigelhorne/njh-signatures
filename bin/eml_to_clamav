@@ -589,7 +589,7 @@ sub extract_iocs_from_email {
 sub check_template_matches {
 	my ($entity, $result) = @_;
 
-	my $content = lc(get_full_email_content($entity));
+	my $content = normalize_text(get_full_email_content($entity));
 
 	foreach my $template_name (keys %templates) {
 		my $template = $templates{$template_name};
@@ -1393,6 +1393,18 @@ sub has_text_plain {
 		return 1 if $part->effective_type eq 'text/plain';
 	}
 	return 0;
+}
+
+sub normalize_text {
+	my ($text) = @_;
+	$text = lc $text;
+	$text =~ s/[^\w\s]/ /g;          # strip punctuation
+	$text =~ s/\s+/ /g;
+	$text =~ s/0/o/g;                # basic leetspeak
+	$text =~ s/1/i/g;
+	$text =~ s/3/e/g;
+	$text =~ s/5/s/g;
+	return $text;
 }
 
 sub print_final_stats {
