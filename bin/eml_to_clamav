@@ -413,6 +413,11 @@ sub process_email_content {
 		add_score($result, 1, "HTML-only email");
 	}
 
+	# Most phishing is HTML-only with no text/plain
+	unless (has_text_plain($entity)) {
+		add_score($result, 1, "HTML-only email");
+	}
+
 	my $sig_data = "Subject: $subject\nFrom: $from\nTo: $to\nMessage-ID: $message_id";
 
 	if ($include_body) {
@@ -1405,6 +1410,14 @@ sub normalize_text {
 	$text =~ s/3/e/g;
 	$text =~ s/5/s/g;
 	return $text;
+}
+
+sub has_text_plain {
+	my ($entity) = @_;
+	for my $part ($entity->parts_DFS) {
+		return 1 if $part->effective_type eq 'text/plain';
+	}
+	return 0;
 }
 
 sub print_final_stats {
