@@ -23,7 +23,6 @@ use threads;
 use Thread::Queue;
 use HTTP::Daemon;
 use HTTP::Status;
-use Digest::SHA qw(sha256_hex);
 use Net::DNS;
 
 # Try to load optional modules
@@ -107,6 +106,8 @@ if ($api_port > 0) {
 }
 
 pod2usage('Error: No EML files specified') if(@ARGV == 0);
+
+$duplicate_check = 0 if($threads == 0);
 
 my @input_paths = @ARGV;
 my @eml_files;
@@ -308,10 +309,10 @@ sub worker_thread {
 		if ($@) {
 			warn "Thread $thread_id: Error processing '$eml_file': $@\n";
 			$result = create_error_result($eml_file, $@);
-			lock($stats{files_failed});
+			lock(%stats);
 			$stats{files_failed}++;
 		} else {
-			lock($stats{files_processed});
+			lock(%stats);
 			$stats{files_processed}++;
 		}
 
@@ -599,33 +600,28 @@ sub extract_iocs_from_email {
 sub check_template_matches {
 	my ($entity, $result) = @_;
 
-	my $content = normalize_text(get_full_email_content($entity));
+	my $text = normalize_text(extract_visible_text($entity));
 
-	foreach my $template_name (keys %templates) {
-		my $template = $templates{$template_name};
+	while (my ($template_name, $template) = each %templates) {
 		my $matches = 0;
-		my $total_patterns = @{$template->{patterns}};
+		my $total = scalar @{$template->{patterns}};
 
-		foreach my $pattern (@{$template->{patterns}}) {
-			$matches++ if $content =~ /\Q$pattern\E/;
+		for my $pattern (@{$template->{patterns}}) {
+			if ($text =~ /\b\Q$pattern\E\b/i) {
+				$matches++;
+			}
 		}
 
-		my $score = 0;
-		while (my ($pattern, $weight) = each %{$template->{patterns}}) {
-			$score += $weight if $content =~ /\b\Q$pattern\E\b/;
-		}
+		next unless $total;
 
-		if ($score >= $template->{threshold}) {
-			add_score($result, 5, "Template match: $template_name");
-		}
+		my $match_ratio = $matches / $total;
 
-		my $match_ratio = $matches / $total_patterns;
 		if ($match_ratio >= $template->{weight}) {
 			push @{$result->{template_matches}}, {
-				name => $template_name,
-				score => $match_ratio,
+				name    => $template_name,
 				matches => $matches,
-				total => $total_patterns
+				total   => $total,
+				ratio   => sprintf('%.2f', $match_ratio),
 			};
 
 			add_score(
@@ -955,7 +951,7 @@ sub generate_xml_output {
 			total_files => scalar(@$results),
 			statistics => \%stats
 		},
-		results => { result => $results },
+		results => $results,
 		global_iocs => \%global_iocs
 	};
 
@@ -1419,10 +1415,10 @@ sub normalize_text {
 	$text = lc $text;
 	$text =~ s/[^\w\s]/ /g;	# strip punctuation
 	$text =~ s/\s+/ /g;
-	$text =~ s/0/o/g;	# basic leetspeak
-	$text =~ s/1/i/g;
-	$text =~ s/3/e/g;
-	$text =~ s/5/s/g;
+	# $text =~ s/0/o/g;	# basic leetspeak
+	# $text =~ s/1/i/g;
+	# $text =~ s/3/e/g;
+	# $text =~ s/5/s/g;
 	return $text;
 }
 
