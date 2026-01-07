@@ -11,6 +11,7 @@ use File::Basename;
 use File::Find;
 use File::Path qw(make_path);
 use Getopt::Long;
+use HTML::Parser;
 use Pod::Usage;
 use Time::HiRes qw(time);
 use Encode qw(decode);
@@ -631,6 +632,27 @@ sub check_template_matches {
 			);
 		}
 	}
+}
+
+sub extract_visible_text {
+	my ($html) = @_;
+	my $text = '';
+
+	my $parser = HTML::Parser->new(
+		api_version => 3,
+		text_h     => [ sub { $text .= $_[0] }, "dtext" ],
+		start_h    => [ sub {}, "tagname, attr" ],
+		end_h      => [ sub {}, "tagname" ],
+	);
+
+	$parser->parse($html);
+	$parser->eof;
+
+	# Normalize whitespace
+	$text =~ s/\s+/ /g;
+	$text =~ s/^\s+|\s+$//g;
+
+	return $text;
 }
 
 sub query_virustotal {
